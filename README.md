@@ -47,7 +47,7 @@
 3. **노드 실행**
    - 퍼블리셔 실행:
      ```bash
-     ros2 run video_publisher video_publisher_node --ros-args -p video_path:=/path/to/video.mp4
+     ros2 run video_publisher video_publisher_node --ros-args -p video_path:=/workspace/2025-08-26AM.mov
      ```
    - YOLO 노드 실행:
      ```bash

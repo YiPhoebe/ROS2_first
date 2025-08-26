@@ -60,3 +60,9 @@ frames/
 *.mp4
 *.db3
 *.pt
+# large binaries
+*.mov
+*.mp4
+*.pt
+*.db3
+frames/
