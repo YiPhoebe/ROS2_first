@@ -1,0 +1,62 @@
+# ---- ROS2 / colcon
+build/
+install/
+log/
+.colcon_cache/
+AMENT_PREFIX_PATH
+
+# ---- Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.venv/
+venv/
+pip-wheel-metadata/
+
+# ---- VSCode / IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# ---- OS / Tools
+.DS_Store
+Thumbs.db
+
+# ---- Images / Videos / Outputs (our app)
+out.mp4
+*.mp4
+frames/
+workspace/frames/
+out_boxes.csv
+out_boxes.json
+dets.ndjson
+
+# ---- Bags (선택적으로 제외)
+*.db3
+rosbag2_*/
+*.mcap
+
+# ---- Weights / Large models (필요시)
+*.pt
+weights/
+workspace/src/yolo_node/weights/
+
+# ---- Misc
+*.lock
+*.log
+
+
+
+
+build/
+install/
+log/
+.colcon_cache/
+dataset/
+frames/
+*.mp4
+*.db3
+*.pt

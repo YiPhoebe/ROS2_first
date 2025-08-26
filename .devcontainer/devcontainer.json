@@ -1,0 +1,12 @@
+{
+  "name": "ROS2 Dev Container",
+  "image": "ros:iron-ros-base",
+  "settings": {
+    "terminal.integrated.defaultProfile.linux": "bash"
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder}/src,target=/workspace/src,type=bind",
+    "source=${localWorkspaceFolder}/datasets,target=/workspace/datasets,type=bind"
+  ],
+  "workspaceFolder": "/workspace",
+  }

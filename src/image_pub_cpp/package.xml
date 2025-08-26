@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>image_pub_cpp</name>
+  <version>0.0.0</version>
+  <description>Minimal image publisher in C++</description>
+  <maintainer email="lee911230@gmail.com">YuJung</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>OpenCV</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
