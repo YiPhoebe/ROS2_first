@@ -55,11 +55,129 @@
      ```
    - Overlay, MOT, 저장 노드 등도 각각 실행 (예시 생략)
 
+### 멀티 터미널 실행 순서 (Quick Start)
+
+아래는 각 터미널에서 실행하는 명령어 예시입니다. 터미널을 여러 개 열어 각 단계별로 실행하세요.
+
+#### 터미널 1 - 이미지 퍼블리셔 (둘 중 하나만 켜기)
+
+**A) 데이터셋 퍼블리셔**
+```bash
+source /opt/ros/iron/setup.bash
+source /workspace/install/setup.bash
+
+python3 /workspace/src/image_pub_test.py
+```
+
+**B) 카메라 테스트 퍼블리셔 (ROS2 기본 제공)**
+```bash
+source /opt/ros/iron/setup.bash
+source /workspace/install/setup.bash
+
+ros2 run image_tools cam2image --ros-args \
+  -p frequency:=10.0 \
+  -p width:=1280 -p height:=720 \
+  -r image:=/image_raw
+```
+
+검증:
+```bash
+ros2 topic hz /image_raw
+```
+
+---
+
+#### 터미널 2 - YOLO 감지 노드
+```bash
+source /opt/ros/iron/setup.bash
+source /workspace/install/setup.bash
+
+ros2 run yolo_subscriber_py yolo_subscriber_py_node --ros-args \
+  -p conf:=0.35 \
+  -p imgsz:=416 \
+  -p every_n:=2
+```
+
+검증:
+```bash
+ros2 topic hz /yolo/bounding_boxes
+ros2 topic type /yolo/bounding_boxes   # my_msgs/msg/BoundingBoxes 나와야 정상
+```
+
+---
+
+#### 터미널 3 - 오버레이/저장 노드
+# (박스 색/라벨·FPS 오버레이 + 저장 옵션)
+```bash
+python3 /workspace/src/overlay_viz.py --ros-args \
+  -p overlay_conf_min:=0.35 \
+  -p show_fps:=true \
+  -p save_mp4:=false \
+  -p save_images:=false \
+  -p save_boxes_csv:=true -p csv_path:=/workspace/out_boxes.csv \
+  -p save_boxes_json:=true -p json_path:=/workspace/out_boxes.json
+```
+
+검증:
+```bash
+ros2 topic hz /image_yolo
+```
+
+---
+
+#### 터미널 4 - 뷰어 (선택)
+```bash
+source /opt/ros/iron/setup.bash
+source /workspace/install/setup.bash
+
+ros2 run rqt_image_view rqt_image_view
+```
+
+---
+
+#### 터미널 5 - MOT 트래커
+```bash
+source /opt/ros/iron/setup.bash
+source /workspace/install/setup.bash
+
+python3 /workspace/src/mot_node.py --ros-args \
+  -p iou_th:=0.3 -p max_missed:=30 \
+  -p save_dets_json:=true -p dets_json_path:=/workspace/dets.ndjson
+```
+
+검증:
+```bash
+source /opt/ros/iron/setup.bash
+source /workspace/install/setup.bash
+
+ros2 topic hz /tracks
+```
+
+---
+
+#### 빠른 종료 & 정리
+아래 명령어로 모든 노드를 한 번에 종료/정리할 수 있습니다:
+```bash
+pkill -f image_pub_test.py || true
+pkill -f cam2image || true
+pkill -f yolo_subscriber_py || true
+pkill -f overlay_viz.py || true
+pkill -f mot_node.py || true
+```
+
 ## 결과 예시
 아래는 파이프라인을 통해 처리된 결과 영상의 예시입니다.
 ![result_example](docs/result_example.png)
 - 검출된 객체에 바운딩 박스와 클래스 라벨, 추적 ID가 Overlay되어 표시됩니다.
 - 결과 영상은 지정된 디렉토리에 mp4 파일로 저장됩니다.
+
+### A/B 비교 예시
+| A (frame_A003090.jpg) | B (frame_B003090.jpg) |
+|---|---|
+| ![A_3090](frame_A003090.jpg) | ![B_3090](frame_B003090.jpg) |
+
+> 참고: 위 경로는 리포지토리 루트 기준입니다. `frame_A003090.jpg` / `frame_B003090.jpg` 파일이 저장소에 포함되어 있어야 GitHub에서 렌더링됩니다.
+
 
 ## 향후 계획
 - YOLO 모델 경량화 및 속도 최적화
