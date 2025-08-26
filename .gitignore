@@ -57,6 +57,8 @@ log/
 .colcon_cache/
 dataset/
 frames/
+frames_A/
+frames_B/
 *.mp4
 *.db3
 *.pt
