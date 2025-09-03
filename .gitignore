@@ -60,6 +60,7 @@ dataset/
 frames/
 frames_A/
 frames_B/
+*.zip
 *.mp4
 *.db3
 *.pt
@@ -69,3 +70,8 @@ frames_B/
 *.pt
 *.db3
 frames/
+dataset/
+dataset_norm/
+*.zip
+*.pt
+*.onnx
