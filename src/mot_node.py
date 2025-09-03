@@ -5,9 +5,9 @@ from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, Du
 from std_msgs.msg import Header
 
 try:
-    from bbox_msgs.msg import BoundingBoxes as BBs
-except ImportError:
     from my_msgs.msg import BoundingBoxes as BBs
+except ImportError:
+    from bbox_msgs.msg import BoundingBoxes as BBs
 
 from my_msgs.msg import Track, TrackArray
 
@@ -29,10 +29,12 @@ class MOT(Node):
         self.max_missed = int(self.declare_parameter('max_missed', 30).value)
         self.save_json = self.declare_parameter('save_dets_json', False).value
         self.json_path = self.declare_parameter('dets_json_path', '/workspace/dets.ndjson').value
+        self.in_boxes_topic = self.declare_parameter('in_boxes_topic', '/yolo/bounding_boxes').value
+        self.out_tracks_topic = self.declare_parameter('out_tracks_topic', '/tracks').value
 
-        self.sub = self.create_subscription(BBs, '/yolo/bounding_boxes', self.cb, qos_profile_sensor_data)
+        self.sub = self.create_subscription(BBs, self.in_boxes_topic, self.cb, qos_profile_sensor_data)
         qos_rel = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
-        self.pub = self.create_publisher(TrackArray, '/tracks', qos_rel)
+        self.pub = self.create_publisher(TrackArray, self.out_tracks_topic, qos_rel)
 
         self.next_id=1
         self.tracks={}  # id -> {bbox, class_id, score, age, missed}
@@ -40,7 +42,9 @@ class MOT(Node):
         if self.save_json:
             os.makedirs(os.path.dirname(self.json_path), exist_ok=True)
             self.f=open(self.json_path,'a',buffering=1)
-        self.get_logger().info(f'MOT ready (iou_th={self.iou_th}, max_missed={self.max_missed}, save_json={self.save_json})')
+        self.get_logger().info(
+            f'MOT ready (iou_th={self.iou_th}, max_missed={self.max_missed}, in={self.in_boxes_topic}, out={self.out_tracks_topic}, save_json={self.save_json})'
+        )
 
     def cb(self,msg:BBs):
         dets=[]

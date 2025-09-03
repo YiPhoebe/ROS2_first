@@ -1,0 +1,23 @@
+# Ultralytics YOLO dataset config for BDD100K det_10
+# Images already exist at /workspace/dataset/bdd100k/bdd100k/images/100k
+# Labels will be created at /workspace/dataset/bdd100k/bdd100k/labels/100k
+
+path: /workspace/dataset/bdd100k/bdd100k
+train: images/100k/train
+val: images/100k/val
+test: images/100k/test
+
+names:
+  - person
+  - rider
+  - car
+  - truck
+  - bus
+  - train
+  - motorcycle
+  - bicycle
+  - traffic light
+  - traffic sign
+
+nc: 10
+

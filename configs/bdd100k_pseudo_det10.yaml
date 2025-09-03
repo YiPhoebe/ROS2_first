@@ -1,0 +1,18 @@
+path: /workspace/dataset/bdd100k/bdd100k
+train: /workspace/configs/bdd100k_pseudo_train.txt
+val: /workspace/configs/bdd100k_pseudo_val.txt
+
+names:
+  - person
+  - rider
+  - car
+  - truck
+  - bus
+  - train
+  - motorcycle
+  - bicycle
+  - traffic light
+  - traffic sign
+
+nc: 10
+

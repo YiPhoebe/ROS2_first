@@ -18,5 +18,5 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
-  <exec_depend>my_msgs</exec_depend>
+  <exec_depend>custom_msgs</exec_depend>
 </package>

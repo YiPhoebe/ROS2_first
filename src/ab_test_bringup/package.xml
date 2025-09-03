@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>ab_test_bringup</name>
+  <version>0.0.1</version>
+  <description>A/B YOLO overlay bringup</description>
+  <maintainer email="you@example.com">you</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- ROS2는 ament_cmake -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 런타임 의존 -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>ros2launch</exec_depend>
+
+  <!-- build_type을 명시하면 catkin 오인 방지에 도움 -->
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

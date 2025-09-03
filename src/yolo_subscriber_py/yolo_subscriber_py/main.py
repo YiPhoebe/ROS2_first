@@ -15,6 +15,11 @@ import numpy as np
 import cv2
 import tempfile
 import os
+import random
+try:
+    import torch
+except Exception:
+    torch = None
 
 def _color_for(name: str):
     name = (name or '').lower()
@@ -35,6 +40,8 @@ class YoloNode(Node):
         self.every_n = int(self.declare_parameter('every_n', 1).get_parameter_value().integer_value)
         self.sub_topic = self.declare_parameter('sub_topic', '/image_raw').get_parameter_value().string_value
         self.pub_topic = self.declare_parameter('pub_topic', '/yolo/bounding_boxes').get_parameter_value().string_value
+        self.debug_log = self.declare_parameter('debug_log', False).get_parameter_value().bool_value
+        self.log_detections = self.declare_parameter('log_detections', False).get_parameter_value().bool_value
 
         # Overlay/filter params
         self.conf_min = self.declare_parameter('overlay_conf_min', 0.25).get_parameter_value().double_value
@@ -49,7 +56,6 @@ class YoloNode(Node):
         self.images_every_n = int(self.declare_parameter('images_every_n', 1).get_parameter_value().integer_value)
 
         # Runtime state
-        self._last_boxes = []
         self._last_img_size = None
         self._fps_ema = None
         self._frame_idx = 0
@@ -58,6 +64,28 @@ class YoloNode(Node):
             os.makedirs(self.images_dir, exist_ok=True)
 
         self.use_tempfile = self.declare_parameter('use_tempfile', False).get_parameter_value().bool_value
+
+        # Reproducibility seed (best-effort)
+        self.seed = int(self.declare_parameter('seed', 42).get_parameter_value().integer_value)
+        try:
+            random.seed(self.seed)
+            np.random.seed(self.seed)
+            if torch is not None:
+                torch.manual_seed(self.seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(self.seed)
+                try:
+                    torch.use_deterministic_algorithms(True)
+                except Exception:
+                    pass
+                try:
+                    import torch.backends.cudnn as cudnn
+                    cudnn.deterministic = True
+                    cudnn.benchmark = False
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # Internal counters
         self._frame_count = 0
@@ -74,13 +102,6 @@ class YoloNode(Node):
             f'YOLO ready (weights={weights}, conf={self.conf_thres}, imgsz={self.imgsz}, every_n={self.every_n}, sub={self.sub_topic}, pub={self.pub_topic})'
         )
 
-    def cb_boxes(self, msg: BoundingBoxes):
-        try:
-            self._last_boxes = list(msg.boxes) if hasattr(msg, 'boxes') else list(getattr(msg, 'bounding_boxes', []))
-        except Exception:
-            self._last_boxes = []
-        self.get_logger().debug(f'recv boxes: {len(self._last_boxes)}')
-
     def cb_image(self, msg: Image):
         # Frame skipping based on every_n
         self._frame_count += 1
@@ -92,28 +113,6 @@ class YoloNode(Node):
         except Exception as e:
             self.get_logger().warn(f'cv_bridge error: {e}')
             return
-
-        # ==== draw boxes (class-colored) ====
-        boxes = getattr(self, '_last_boxes', []) or []
-        for bb in boxes:
-            try:
-                # support either xmin/xmax or x/width style fields
-                if hasattr(bb, 'xmin'):
-                    x1, y1, x2, y2 = int(bb.xmin), int(bb.ymin), int(bb.xmax), int(bb.ymax)
-                else:
-                    x1, y1 = int(getattr(bb, 'x', 0)), int(getattr(bb, 'y', 0))
-                    x2 = x1 + int(getattr(bb, 'width', 0))
-                    y2 = y1 + int(getattr(bb, 'height', 0))
-                name = getattr(bb, 'class_id', None) or getattr(bb, 'label', '')
-                conf = float(getattr(bb, 'probability', getattr(bb, 'score', 0.0)))
-                if conf < self.conf_min:
-                    continue
-                color = _color_for(name)
-                cv2.rectangle(img_bgr, (x1, y1), (x2, y2), color, 2)
-                label = f"{name} {conf:.2f}" if name else f"{conf:.2f}"
-                cv2.putText(img_bgr, label, (x1, max(0, y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
-            except Exception:
-                continue
 
         # ==== FPS overlay ====
         if self.show_fps:
@@ -151,67 +150,29 @@ class YoloNode(Node):
             except Exception as e:
                 self.get_logger().warn(f'Image save failed: {e}')
 
-        # Ensure RGB format and contiguous memory for YOLO
-        try:
-            frame_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        except Exception:
-            frame_rgb = img_bgr[..., ::-1]
-        frame_rgb = np.ascontiguousarray(frame_rgb)
-
-        # Compute average brightness
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        avg_brightness = gray.mean()
-        self.get_logger().info(f'Average brightness: {avg_brightness:.2f}')
-
-        # Log frame info
-        try:
-            h, w = img_bgr.shape[:2]
-            self.get_logger().info(f'frame: shape=({h},{w},3), dtype={img_bgr.dtype}')
-        except Exception:
-            pass
-
-        # Run inference using three sources and select best result
-        results_list = []
-
-        # 1. RGB ndarray
-        results_rgb = self.model.predict(source=frame_rgb, conf=self.conf_thres, imgsz=self.imgsz, verbose=False)
-        det_count_rgb = 0
-        if results_rgb:
-            r0_rgb = results_rgb[0]
-            if hasattr(r0_rgb, 'boxes') and r0_rgb.boxes is not None:
-                det_count_rgb = len(r0_rgb.boxes)
-        results_list.append((det_count_rgb, results_rgb[0] if results_rgb else None))
-
-        # 2. BGR ndarray
-        results_bgr = self.model.predict(source=img_bgr, conf=self.conf_thres, imgsz=self.imgsz, verbose=False)
-        det_count_bgr = 0
-        if results_bgr:
-            r0_bgr = results_bgr[0]
-            if hasattr(r0_bgr, 'boxes') and r0_bgr.boxes is not None:
-                det_count_bgr = len(r0_bgr.boxes)
-        results_list.append((det_count_bgr, results_bgr[0] if results_bgr else None))
-
-        # 3. Optional: Temporary JPEG file saved from frame_bgr
-        r_temp = None
-        det_count_temp = 0
-        if self.use_tempfile:
+        # Optional debug: frame stats
+        if self.debug_log:
             try:
+                gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+                avg_brightness = gray.mean()
+                h, w = img_bgr.shape[:2]
+                self.get_logger().debug(f'frame: {w}x{h}, avg_brightness={avg_brightness:.2f}, dtype={img_bgr.dtype}')
+            except Exception:
+                pass
+
+        # Run single inference (BGR ndarray by default, optional tempfile path)
+        r_use = None
+        try:
+            if self.use_tempfile:
                 with tempfile.NamedTemporaryFile(suffix='.jpg', delete=True) as tmpfile:
                     cv2.imwrite(tmpfile.name, img_bgr)
-                    results_temp = self.model.predict(source=tmpfile.name, conf=self.conf_thres, imgsz=self.imgsz, verbose=False)
-                    if results_temp:
-                        r0_temp = results_temp[0]
-                        if hasattr(r0_temp, 'boxes') and r0_temp.boxes is not None:
-                            det_count_temp = len(r0_temp.boxes)
-                        r_temp = r0_temp
-            except Exception as e:
-                self.get_logger().warn(f'Error during temporary file inference: {e}')
-        results_list.append((det_count_temp, r_temp))
-
-        # Select best result
-        det_n, r_use = max(results_list, key=lambda x: x[0]) if results_list else (0, None)
-
-        self.get_logger().info(f'Detections counts - RGB: {det_count_rgb}, BGR: {det_count_bgr}, Temp JPEG: {det_count_temp}')
+                    results = self.model.predict(source=tmpfile.name, conf=self.conf_thres, imgsz=self.imgsz, verbose=False)
+            else:
+                results = self.model.predict(source=img_bgr, conf=self.conf_thres, imgsz=self.imgsz, verbose=False)
+            if results:
+                r_use = results[0]
+        except Exception as e:
+            self.get_logger().warn(f'inference error: {e}')
 
         # Build and publish message
         out = BoundingBoxes()
@@ -221,7 +182,7 @@ class YoloNode(Node):
             out.header.frame_id = msg.header.frame_id if hasattr(msg, 'header') else 'camera'
 
         boxes = []
-        if r_use is not None and det_n > 0:
+        if r_use is not None and getattr(r_use, 'boxes', None) is not None:
             names_map = getattr(self.model, 'names', None)
             for b in r_use.boxes:
                 xyxy = b.xyxy[0].tolist()
@@ -231,8 +192,8 @@ class YoloNode(Node):
                 cls_id = int(b.cls[0]) if b.cls is not None else -1
                 conf = float(b.conf[0]) if b.conf is not None else 0.0
                 name = names_map.get(cls_id, str(cls_id)) if names_map else str(cls_id)
-
-                self.get_logger().info(f'Detection: name={name}, conf={conf:.3f}, bbox=({x1}, {y1}, {x2}, {y2})')
+                if self.log_detections:
+                    self.get_logger().info(f'Detection: name={name}, conf={conf:.3f}, bbox=({x1}, {y1}, {x2}, {y2})')
 
                 bb = BoundingBox()
                 if hasattr(bb, 'x'): bb.x = x1
@@ -288,6 +249,16 @@ class YoloNode(Node):
             elif p.name == 'use_tempfile':
                 try:
                     self.use_tempfile = bool(p.value)
+                except Exception:
+                    pass
+            elif p.name == 'debug_log':
+                try:
+                    self.debug_log = bool(p.value)
+                except Exception:
+                    pass
+            elif p.name == 'log_detections':
+                try:
+                    self.log_detections = bool(p.value)
                 except Exception:
                     pass
         return SetParametersResult(successful=True)

@@ -1,0 +1,264 @@
+import functools
+import gc
+import math
+import os
+import random
+import time
+
+from contextlib import contextmanager
+from copy import deepcopy
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Union
+
+import numpy as np
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.nn.functional as F
+
+from ultralytics import __version__
+from ultralytics.utils import (
+    DEFAULT_CFG_DICT,
+    DEFAULT_CFG_KEYS,
+    LOGGER,
+    NUM_THREADS,
+    PYTHON_VERSION,
+    TORCHVISION_VERSION,
+    WINDOWS,
+    colorstr,
+)
+
+from ultralytics.utils.checks import check_version
+from ultralytics.utils.patches import torch_load
+
+# Version checks (all default to version >= min_version)
+TORCH_1_9 = check_version(torch.__version__, "1.9.0")
+TORCH_1_13 = check_version(torch.__version__, "1.13.0")
+TORCH_2_0 = check_version(torch.__version__, "2.0.0")
+TORCH_2_4 = check_version(torch.__version__, "2.4.0")
+
+TORCHVISION_0_10 = check_version(TORCHVISION_VERSION, "0.10.0")
+TORCHVISION_0_11 = check_version(TORCHVISION_VERSION, "0.11.0")
+TORCHVISION_0_13 = check_version(TORCHVISION_VERSION, "0.13.0")
+TORCHVISION_0_18 = check_version(TORCHVISION_VERSION, "0.18.0")
+
+if WINDOWS and check_version(torch.__version__, "==2.4.0"):
+    LOGGER.warning(
+        "Known issue with torch==2.4.0 on Windows with CPU, recommend upgrading to torch>=2.4.1 to resolve "
+        "https://github.com/ultralytics/ultralytics/issues/15049"
+    )
+
+@contextmanager
+def torch_distributed_zero_first(local_rank: int):
+    """Ensure all processes in distributed training wait for the local master (rank 0) to complete a task first."""
+    initialized = dist.is_available() and dist.is_initialized()
+    use_ids = initialized and dist.get_backend() == "nccl"
+
+    if initialized and local_rank not in {-1, 0}:
+        dist.barrier(device_ids=[local_rank]) if use_ids else dist.barrier()
+
+    yield
+    if initialized and local_rank == 0:
+        dist.barrier(device_ids=[local_rank]) if use_ids else dist.barrier()
+
+def smart_inference_mode():
+    """Apply torch.inference_mode() decorator if torch >= 1.9.0 else torch.no_grad() decorator."""
+
+    def decorate(fn):
+        """Apply appropriate torch decorator for inference mode based on torch version."""
+        if TORCH_1_9 and torch.is_inference_mode_enabled():
+            return fn  # already in inference_mode, act as a pass-through
+        else:
+            return (torch.inference_mode if TORCH_1_9 else torch.no_grad)()(fn)
+        
+        return decorate
+    
+def autocast(enabled: bool, device: str = "cuda"):
+    """
+    Get the appropriate autocast context manager based on PyTorch version and AMP setting.
+
+    This function returns a context manager for automatic mixed precision (AMP) training that is compatible with both
+    older and newer versions of PyTorch. It handles the differences in the autocast API between PyTorch versions.
+
+    Args:
+        enabled (bool): Whether to enable automatic mixed precision.
+        device (str, optional): The device to use for autocast.
+
+    Returns:
+        (torch.amp.autocast): The appropriate autocast context manager.
+
+    Notes:
+        - For PyTorch versions 1.13 and newer, it uses `torch.amp.autocast`.
+        - For older versions, it uses `torch.cuda.autocast`.
+
+    Examples:
+        >>> with autocast(enabled=True):
+        ...     # Your mixed precision operations here
+        ...     pass
+    """
+    if TORCH_1_13:
+        return torch.amp.autocast_mode(device, enabled=enabled)
+    else:
+        return torch.cuda.amp.autocast(enabled)
+    
+@function.lru_cache
+def get_cpu_info():
+    """Return a string with system CPU information, i.e. 'Apple M2'."""
+    from ultralytics.utils import PERSISTENT_CACHE
+
+    if "cpu_info" not in PERSISTENT_CACHE:
+        try:
+            import cpuinfo
+
+            k = "brand_raw", "hardware_raw", "arch_string_raw"  # keys sorted by preference
+            info = cpuinfo.get_cpu_info()   # info dict
+            string = info.get(k[0] if k[0] in info else k[1] if k[1] in info else k[2], "unknown")
+            PERSISTENT_CACHE["cpu_info"] = string.replace("(R)", "").replace("CPU", "").replace("@ ", "")
+
+        except Exception:
+            pass
+    return PERSISTENT_CACHE.get("cpu_info", "unknown")
+
+@functools.lru_cache
+def get_gpu_info(index):
+    """Return a string with system GPU information, i.e. 'Tesla T4, 15102MiB'."""
+    properties = torch.cuda.get_device_properties(index)
+    return f"{properties.name}, {properties.total_memory / (1 << 20):.0f}MiB"
+
+def select_device(device="", batch=0, newline=False, verbose=True):
+    """
+    Select the appropriate PyTorch device based on the provided arguments.
+
+    The function takes a string specifying the device or a torch.device object and returns a torch.device object
+    representing the selected device. The function also validates the number of available devices and raises an
+    exception if the requested device(s) are not available.
+
+    Args:
+        device (str | torch.device, optional): Device string or torch.device object. Options are 'None', 'cpu', or
+            'cuda', or '0' or '0,1,2,3'. Auto-selects the first available GPU, or CPU if no GPU is available.
+        batch (int, optional): Batch size being used in your model.
+        newline (bool, optional): If True, adds a newline at the end of the log string.
+        verbose (bool, optional): If True, logs the device information.
+
+    Returns:
+        (torch.device): Selected device.
+
+    Raises:
+        ValueError: If the specified device is not available or if the batch size is not a multiple of the number of
+            devices when using multiple GPUs.
+
+    Examples:
+        >>> select_device("cuda:0")
+        device(type='cuda', index=0)
+
+        >>> select_device("cpu")
+        device(type='cpu')
+
+    Notes:
+        Sets the 'CUDA_VISIBLE_DEVICES' environment variable for specifying which GPUs to use.
+    """
+    if isinstance(device, torch.device) or str(device).startswith(("tpu", "intel")):
+        return device
+    
+    s = f"Ultralytics {__version__} Python-{PYTHON_VERSION} torch-{torch.__version__} "
+    device = str(device).lower()
+    for remove in "cuda:", "none", "(", ")", "[", "]", "'", " ":
+        device = device.replace(remove, "")
+
+    # Auto-select GPUs
+    if "-1" in device:
+        from ultralytics.utils.autodevice import GPUInfo
+
+        # Replace each -1 with a selected GPU or remove it
+        parts = device.split(",")
+        selected = GPUInfo().select_idle_gpu(count=parts.count("-1"), min_menory_fraction=0.2)
+        for i in range(len(parts)):
+            if parts[i] == "-1":
+                parts[i] = str(selected.pop(0)) if selected else ""
+        device = ",".join(p for p in parts if p)
+
+    cpu = device == "cpu"
+    mps = device in {"mps", "mps:0"}    # Apply Metal Performence Shaders (MPS)
+    if cpu or mps:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"   # force torch.cuda.is_available() = False
+    elif device:    # non-cpu device requested
+        if device == "cuda":
+            device = "0"
+        if "," in device:
+            device = ",".join([x for x in device.split(",") if x])  # remove sequential commas, i.e. "0,,1" -> "0,1"
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+        os.environ["CUDA_VISIBLE_DEVICES"] = device # set enviroment variable - must be before assert is_availble()
+
+        if not (torch.cuda.is_available() and torch.cuda.device_count() >= len(device.split(","))):
+            LOGGER.info(s)
+            install = (
+                "See https://pytorch.org/get-started/locally/ for up-to-date torch install instructions if no"
+                "CUDA devices are seen by torch.\n"
+                if torch.cuda.device_count() == 0
+                else ""
+            )
+            raise ValueError(
+                f"Invalid CUDA 'device={device}' requested."
+                f" Use 'device=cpu' or pass valid CUDA device(s) if available,"
+                f" i.e. 'device=0' or 'device=0,1,2,3' for Multi-GPU.\n"
+                f"\ntorch.cuda.is_available(): {torch.cuda.is_available()}"
+                f"\ntorch.cuda.device_count(): {torch.cuda.device_count()}"
+                f"\nos.environ['CUDA_VISIBLE_DEVICES']: {visible}\n"
+                f"{install}"
+            )
+    if not cpu and not mps and torch.cuda.is_available():   # prefer GPU if available
+        devices = device.split(",") if device else "0"  # i.e. "0, 1" -> ["0", "1"]
+
+        n = len(device) # device count
+        if n > 1:   # multi-GPU
+            if batch < 1:
+                raise ValueError(
+                    "AutoBatch with batch<1 not supported for Multi-GPU training, "
+                    f"please specify a valid batch size multiple of GPU count {n}, i.e. batch={n * 8}."
+                )
+            if batch >= 0 and batch % n != 0:  # check batch_size is divisible by device_count
+                raise ValueError(
+                    f"'batch={batch}' must be a multiple of GPU count {n}. Try 'batch={batch // n * n}' or "
+                    f"'batch={batch // n * n + n}', the nearest batch sizes evenly divisible by {n}."
+                )
+            space = " " * (len(s) + 1)
+            for i, d in enumerate(device):
+                s += f"{'' if i == 0 else space}CUDA:{d} ({get_gpu_info(i)})\n" # bytes to MB
+            arg = "cuda:0"
+        elif mps and TORCH_2_0 and torch.backends.mps.is_available():
+            # Prefer MPS if available
+            s += f"MPS ({get_cpu_info()})\n"
+            arg = "mps"
+        else:   # revert to CPU
+            s += f"CPU ({get_cpu_info()})\n"
+            arg = "cpu"
+
+        if arg in {"cpu", "mps"}:
+            torch.set_num_threads(NUM_THREADS)  # reset OMP_NUM_THREADS for cpu training
+        if verbose:
+            LOGGER.info(s if newline else s.rsplit())
+        return torch.device(arg)
+    
+def time_sync():
+    """Return PyTorch-accurate time."""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    return time.time()
+
+def fuse_conv_and_bn(conv, bn):
+    """Fuse Conv2d() and BatchNorm2d() layers."""
+    fusedconv = (
+        nn.Conv2d(
+            conv.in_channels,
+            conv.out_channels,
+            kernel_size=conv.kernel_size,
+            stride=conv.stride,
+            padding=conv.padding,
+            dilation=conv.dilation,
+            groups=conv.groups,
+            bias=True,
+        )
+        .requires_grad_(False)
+        .to(conv.weight.device)
+    )
